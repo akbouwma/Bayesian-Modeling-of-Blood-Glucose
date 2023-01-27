@@ -1,0 +1,798 @@
+---
+title: "Bayesian Inference and Data Analysis of Blood Glucose levels"
+author: "Alan Bouwman"
+date: "December 2, 2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coda)
+library(rjags)
+library(lemon)
+library(dplyr)
+```
+
+# Section 1: Introduction
+A population of 532 women living near Phoenix, Arizona were tested for diabetes. Other information was gathered from these women at the time of testing, including number of pregnancies, glucose level, blood pressure, skin fold thickness, body mass index, diabetes pedigree and age.  Our goal is to determine if the statistical model presented in section 3 is adequate for describing blood glucose level of the 532 women.  Figure 1 shows the histogram and density of the blood glucose levels for the 532 participants.  The histogram indicates that we are probably looking at a mixture of normal distributions from 2 populations: women with normal blood glucose levels and women with high blood glucose levels (possibly diabetic).
+
+
+### Figure 1: Histogram and Density Plot of Blood Glucose Level
+This is the histogram of the 532 participants.  We also show the the mean (121 mg/dL), median (115 mg/dL), and $\pm 2$ standard deviations from the mean (one standard deviation is about 31 mg/dL).  According to the Center of Disease control, about 12% of women in the united states have diabetes, so we also show the 88% quantile, which is about 165 mg/dL.  
+```{r, echo=FALSE}
+data = scan("./glucose.dat", quiet=TRUE)
+hist(data, prob=TRUE, 
+     xlab = "Blood Glucose Level (mg/dL)",
+     main = "Histogram and Density Plot of Blood Glucose Level")
+lines(density(data))
+abline(v=mean(data), col=2, lwd=3)
+abline(v=median(data), col=4, lwd=3)
+abline(v=mean(data)+2*sd(data), col=3, lwd=2)
+abline(v=mean(data)-2*sd(data), col=3, lwd=2)
+abline(v=165, col=7, lwd=2)
+legend(x = 135, y = 0.0152, 
+   legend = c("Mean", "Median", "+/- 2sd", "88% quantile"),
+   col = c(2, 4, 3, 7), lwd = c(3,3,2, 2))
+```
+
+# Section 2: Statistical Analysis
+In this work, we use are doing Bayesian data analysis of the Blood Glucose levels.  We derive the full conditional distributions and implement a Gibbs sampler to approximate the posterior distribution for the parameters $\theta_{(1)}$ and $\theta_{(2)}$ which represent the means of the normal and high blood glucose groups respectively.
+
+
+# Section 3: Statistical Model
+## Sampling and Prior Distributions
+We choose to use a mixture model for the data.  For each of the $n=532$ study participants, we assign a group membership variable $X_i$ such that
+$$
+\begin{aligned}
+  X_i = 
+  \begin{cases}
+    1 & \text{with probability } \pi \\
+    2 & \text{with probability } 1- \pi
+  \end{cases}
+\end{aligned}
+$$
+
+Then the observed data $Y_i$ is given the following density:
+$$
+\begin{aligned}
+  p(y_i|x_i) = 
+  \begin{cases}
+    dnorm(y_i; \theta_1, \sigma^2_1) & x_i = 1 \\
+    dnorm(y_i; \theta_2, \sigma^2_2) & x_i = 2
+  \end{cases}
+\end{aligned}
+$$
+Note that the $X_i$ are independent and the $Y_i$ are independent given the $X_i$.
+
+We use the following prior distribution for the model:
+$$
+\begin{aligned}
+  p(\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2) &= p(\pi) p(\theta_1) p(\theta_2) p(\sigma_1^2) p(\sigma_2^2) \\
+  pi &\sim beta(\alpha, beta) \\
+  \theta_j &\sim normal(\mu_0, \tau_0^2) \text{ for both } j=1,2 \\
+  \sigma^2_j &\sim inverse-gamma(\nu_0/2, \sigma_0^2 \nu_0 / 2) \text{ for both } j=1,2 \\
+\end{aligned}
+$$
+
+## Full Conditional Distributions
+We derive the full conditional distributions for all of the variables.  Let $n_1 = \sum_{i, x_i = 1} 1$ and $n_2 = \sum_{i, x_i = 2} 1$ and note that $n_2 = n - n_1$.  Then, let $\bar{y}_1 = \frac{1}{n_1} \sum_{i, x_i = 1}{y_i}$ and $\bar{y}_2 = \frac{1}{n_2} \sum_{i, x_i = 2}{y_i}$
+$$
+\begin{aligned}
+  p(X_i=x_i|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X_{-i}})
+  &\propto p(X_i, \pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X_{-i}}) \\
+  &\propto p(\boldsymbol{Y}| X_i, \pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{X_{-i}} )
+    p(X_i | \pi) p(\pi)  p(\theta_1) p(\theta_2) p(\sigma_1^2) p(\sigma_2^2) \\
+  &\propto p(Y_i | X_i, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2) p(X_i | \pi) \\
+  &\propto dbinom(x_i; n, 1, p_2/(p_1+p_2)) + 1
+\end{aligned}
+$$
+where
+$$
+\begin{aligned}
+  p_1 &= dnorm(y_i; \theta_1, \sigma^2_1), \\
+  p_2 &= dnorm(y_i; \theta_2, \sigma^2_2).
+\end{aligned}
+$$
+
+
+$$
+\begin{aligned}
+  p(\pi | \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X}) 
+  &\propto p(\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X}) \\
+  &\propto p(\boldsymbol{Y}| \pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{X} ) 
+    p(\boldsymbol{X} | \pi) p(\pi)  p(\theta_1) p(\theta_2) p(\sigma_1^2) p(\sigma_2^2) \\
+  &\propto p(\boldsymbol{X} | \pi) p(\pi) \\
+  &\propto dbinom(X=n_1; n, \pi) dbeta(\pi; \alpha, \beta) \\
+  &\propto \pi^{n_1} (1-\pi)^{n-n_1} \pi^{\alpha-1} (1-\pi)^{\beta - 1} \\
+  &= \pi^{n_1 + \alpha - 1} (1-\pi)^{\beta + n_2 - 1} \\
+  &\propto dbeta(\pi; \alpha+n_1, \beta + n_2)
+\end{aligned}
+$$
+$$
+\begin{aligned}
+  p(\theta_1|\pi, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X})
+  &\propto p(\boldsymbol{Y}|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{X}) 
+    p(\boldsymbol{X}|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2) p(\theta_1) \\
+  &\propto p(\boldsymbol{Y}|\theta_1, \sigma_1^2) p(\theta_1) \\
+  &\propto dnorm(y_i; \theta_1, \sigma_1^2) dnorm(\theta_1; \mu_0, \theta_0) \\
+  &\propto dnorm \left( \theta_1; \frac{\frac{1}{\tau_0}\mu_0 + \frac{n_1}{\sigma_1^2}\bar{y_1}}{\frac{1}{\tau_0} + \frac{n_1}{\sigma_1^2}},
+    \frac{1}{\frac{1}{\tau_0} + \frac{n_1}{\sigma_1^2}} \right)
+\end{aligned}
+$$
+
+$$
+\begin{aligned}
+  p(\theta_2|\pi, \theta_1, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X})
+  &\propto p(\boldsymbol{Y}|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{X}) 
+    p(\boldsymbol{X}|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2) p(\theta_2) \\
+  &\propto p(\boldsymbol{Y}| \theta_2, \sigma_2^2) p(\theta_2) \\
+  &\propto dnorm(y_i; \theta_2, \sigma_2^2) dnorm(\theta_2; \mu_0, \theta_0) \\
+  &\propto dnorm \left( \theta_2; \frac{\frac{1}{\tau_0}\mu_0 + \frac{n_2}{\sigma_2^2}\bar{y_2}}{\frac{1}{\tau_0} + \frac{n_2}{\sigma_2^2}},
+    \frac{1}{\frac{1}{\tau_0} + \frac{n_2}{\sigma_2^2}} \right)
+\end{aligned}
+$$
+$$
+\begin{aligned}
+  p(\sigma_1^2|\pi, \theta_1, \theta_2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X})
+  &\propto p(\boldsymbol{Y}|\theta_1, \sigma_1^2) p(\sigma_1^2) \\
+  &\propto dnorm(y; \theta_1, \sigma_1^2) dinversegamma(\sigma_1^2; \nu_0/2, \nu_0/2 \sigma_0^2) \\
+  &\propto dinversegamma \left(\sigma_1^2; \frac{\nu_0+n_1}{2}, \frac{\nu_0+n_1}{2} \frac{\nu_0 \sigma_0^2 + \sum_{i, x_i = 1}(y_i - \theta)^2}{\nu_0+n_1} \right)
+\end{aligned}
+$$
+
+
+$$
+\begin{aligned}
+  p(\sigma_2^2|\pi, \theta_1, \theta_2, \sigma_1^2, \boldsymbol{Y}, \boldsymbol{X})
+  &\propto p(\boldsymbol{Y}|\theta_2, \sigma_2^2) p(\sigma_2^2) \\
+  &\propto dnorm(y; \theta_2, \sigma_2^2) dinversegamma(\sigma_2^2; \nu_0/2, \nu_0/2 \sigma_0^2) \\
+  &\propto dinversegamma \left(\sigma_2^2; \frac{\nu_0+n_2}{2}, \frac{\nu_0+n_2}{2} \frac{\nu_0 \sigma_0^2 + \sum_{i, x_i=2}(y_i - \theta)^2}{\nu_0+n_2} \right)
+\end{aligned}
+$$
+Summarized the full conditional distributions are:
+$$
+\begin{aligned}
+  &p(X_i=x_i|\pi, \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X_{-i}})
+    \propto dbinom(x_i; n, 1, p_2/(p_1+p_2)) + 1 \\
+  &p(\pi | \theta_1, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X}) 
+    \propto dbeta(\pi; \alpha+n_1, \beta + n_2) \\
+  &p(\theta_1|\pi, \theta_2, \sigma_1^2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X}) 
+    \propto dnorm ( \theta_1; \mu_{n,1}, \sigma^2_{n,1}) \\
+  &p(\sigma_1^2|\pi, \theta_1, \theta_2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X})
+   \propto dinverse-gamma(\sigma_1^2; \nu_{n,1}/2, \tau^2_{n,1} \nu_{n,1}/2 ) \\
+  &p(\sigma_2^2|\pi, \theta_1, \theta_2, \sigma_2^2, \boldsymbol{Y}, \boldsymbol{X})
+   \propto dinverse-gamma(\sigma_2^2; \nu_{n,2}/2, \tau^2_{n,2} \nu_{n,2}/2 ) \\
+\end{aligned}
+$$
+where
+$$
+\begin{aligned}
+  p_1 &= dnorm(y_i; \theta_1, \sigma^2_1) \\
+  p_2 &= dnorm(y_i; \theta_2, \sigma^2_2) \\
+  \mu_{n,1} &= \frac{\frac{1}{\tau_0}\mu_0 + \frac{n_1}{\sigma_1^2}\bar{y_1}}{\frac{1}{\tau_0} + \frac{n_1}{\sigma_1^2}} \\
+  \sigma^2_{n,1} &= \frac{1}{\frac{1}{\tau_0} + \frac{n_1}{\sigma_1^2}} \\
+  \mu_{n,2} &= \frac{\frac{1}{\tau_0}\mu_0 + \frac{n_2}{\sigma_2^2}\bar{y_2}}{\frac{1}{\tau_0} + \frac{n_2}{\sigma_2^2}} \\
+  \sigma^2_{n,2} &= \frac{1}{\frac{1}{\tau_0} + \frac{n_2}{\sigma_2^2}} \\
+  \nu_{n,1} &= \nu_0 + n_1 \\
+  \tau^2_{n,1} &= \frac{\nu_0 \sigma_0^2 + \sum_{i, x_i = 1}(y_i - \theta)^2}{\nu_{n,1}} \\
+  \nu_{n,2} &= \nu_0 + n_2 \\
+  \tau^2_{n,2} &= \frac{\nu_0 \sigma_0^2 + \sum_{i, x_i = 2}(y_i - \theta)^2}{\nu_{n,2}} \\
+\end{aligned}
+$$
+
+# Section 4: Gibbs Sampler and MCMC Diagnostics
+
+```{r, echo=FALSE, include=FALSE}
+# Model Conditions
+data = scan("glucose.dat")
+y = data
+n = length(data)
+alpha=1
+beta=1
+mu0=120
+tau0 = 200
+sigSqr0=1000
+nu0=10
+S=10000
+pi = 0.5
+# if y >= median, then x=2.  Thus x=1 when y<median.
+
+##################################################  CHAIN 1   ##################################################
+# Initial Conditions
+x = as.integer(y >= median(y)) + 1
+sigSqr1 = var(y[x==1])
+sigSqr2 = var(y[x==2])
+
+# stats we're recording
+theta1Vect.c1 = rep(NA, S)
+theta2Vect.c1 = rep(NA, S)
+sigSqr1Vect.c1 = rep(NA, S)
+sigSqr2Vect.c1 = rep(NA, S)
+X.c1 = matrix(nrow=S, ncol=n)
+Ytidle.c1 = matrix(nrow=S, ncol=n)
+ytidle.c1 = rep(NA, n)
+#stat_names = c("pi", "theta1", "theta2", "sigSqr2")
+stats.c1 = matrix(nrow=S, ncol=5)
+colnames(stats.c1) = c("pi", "theta1", "theta2", "sigSqr1", "sigSqr2")
+
+set.seed(73)
+for (i in 1:S) {
+  n1 = sum(x==1)
+  n2 = sum(x==2)
+  y1 = y[x==1]
+  y2 = y[x==2]
+  
+  pi = rbeta(1, alpha+n1, beta+(n-n1))
+  
+  # theta 1
+  s2n1 = 1/(1/tau0 + n1/sigSqr1)
+  mun1 = (1/tau0*mu0 + n1/sigSqr1*mean(y1))/(1/tau0 + n1/sigSqr1)
+  theta1 = rnorm(1, mun1, sqrt(s2n1))
+  
+  # siq sqr 1
+  nun1 = nu0+n1
+  s2n1 = ( nu0*sigSqr0 + sum((y1-theta1)^2) ) / nun1
+  sigSqr1 = 1/rgamma(1, nun1/2, s2n1*nun1/2)
+  
+  # theta 2
+  s2n2 = 1/(1/tau0 + n2/sigSqr2)
+  mun2 = (1/tau0*mu0 + n2/sigSqr2*mean(y2))/(1/tau0 + n2/sigSqr2)
+  theta2 = rnorm(1, mun2, sqrt(s2n2))
+  
+  # sig sqr 2
+  nun2 = nu0+n2
+  s2n2 = (nu0*sigSqr0 + sum((y2-theta2)^2) ) / nun2
+  sigSqr2 = 1/rgamma(1, nun2/2, s2n2*nun2/2)
+  
+  x1 = pi * dnorm(y, theta1, sqrt(sigSqr1))
+  x2 = (1-pi) * dnorm(y, theta2, sqrt(sigSqr2))
+  
+  prob = x2/(x1+x2)
+  x <- rbinom(n, 1, prob) + 1
+  xPI = rbinom(n, 1, 1-pi) + 1
+  X.c1[i,] = x
+  ytidle.c1[which(xPI==1)] = rnorm(length(which(xPI==1)), theta1, sqrt(sigSqr1))
+  ytidle.c1[which(xPI==2)] = rnorm(length(which(xPI==2)), theta2, sqrt(sigSqr2))
+  Ytidle.c1[i,] = ytidle.c1
+  
+  sigSqr1Vect.c1[i] = sigSqr1
+  sigSqr2Vect.c1[i] = sigSqr2
+  theta1Vect.c1[i] = theta1
+  theta2Vect.c1[i] = theta2
+  stats.c1[i, 1] = pi
+  stats.c1[i, 2] = theta1
+  stats.c1[i, 3] = theta2
+  stats.c1[i, 4] = sigSqr1
+  stats.c1[i, 5] = sigSqr2
+  
+}
+theta.min.c1 = pmin(stats.c1[,"theta1"], stats.c1[,"theta2"])
+theta.max.c1 = pmax(stats.c1[,"theta1"], stats.c1[,"theta2"])
+
+##################################################  CHAIN 2   ##################################################
+# Initial Conditions
+x = rbinom(n, 1, 0.5) + 1
+sigSqr1 = var(y[x==1])
+sigSqr2 = var(y[x==2])
+
+# stats we're recording
+theta1Vect.c2 = rep(NA, S)
+theta2Vect.c2 = rep(NA, S)
+sigSqr1Vect.c2 = rep(NA, S)
+sigSqr2Vect.c2 = rep(NA, S)
+X.c2 = matrix(nrow=S, ncol=n)
+Ytidle.c2 = matrix(nrow=S, ncol=n)
+ytidle.c2 = rep(NA, n)
+#stat_names = c("pi", "theta1", "theta2", "sigSqr2")
+stats.c2 = matrix(nrow=S, ncol=5)
+colnames(stats.c2) = c("pi", "theta1", "theta2", "sigSqr1", "sigSqr2")
+
+set.seed(73)
+for (i in 1:S) {
+  n1 = sum(x==1)
+  n2 = sum(x==2)
+  y1 = y[x==1]
+  y2 = y[x==2]
+  
+  pi = rbeta(1, alpha+n1, beta+(n-n1))
+  
+  # theta 1
+  s2n1 = 1/(1/tau0 + n1/sigSqr1)
+  mun1 = (1/tau0*mu0 + n1/sigSqr1*mean(y1))/(1/tau0 + n1/sigSqr1)
+  theta1 = rnorm(1, mun1, sqrt(s2n1))
+  
+  # siq sqr 1
+  nun1 = nu0+n1
+  s2n1 = ( nu0*sigSqr0 + sum((y1-theta1)^2) ) / nun1
+  sigSqr1 = 1/rgamma(1, nun1/2, s2n1*nun1/2)
+  
+  # theta 2
+  s2n2 = 1/(1/tau0 + n2/sigSqr2)
+  mun2 = (1/tau0*mu0 + n2/sigSqr2*mean(y2))/(1/tau0 + n2/sigSqr2)
+  theta2 = rnorm(1, mun2, sqrt(s2n2))
+  
+  # sig sqr 2
+  nun2 = nu0+n2
+  s2n2 = (nu0*sigSqr0 + sum((y2-theta2)^2) ) / nun2
+  sigSqr2 = 1/rgamma(1, nun2/2, s2n2*nun2/2)
+  
+  x1 = pi * dnorm(y, theta1, sqrt(sigSqr1))
+  x2 = (1-pi) * dnorm(y, theta2, sqrt(sigSqr2))
+  
+  prob = x2/(x1+x2)
+  x <- rbinom(n, 1, prob) + 1
+  xPI = rbinom(n, 1, 1-pi) + 1
+  X.c2[i,] = x
+  ytidle.c2[which(xPI==1)] = rnorm(length(which(xPI==1)), theta1, sqrt(sigSqr1))
+  ytidle.c2[which(xPI==2)] = rnorm(length(which(xPI==2)), theta2, sqrt(sigSqr2))
+  Ytidle.c2[i,] = ytidle.c2
+  
+  sigSqr1Vect.c2[i] = sigSqr1
+  sigSqr2Vect.c2[i] = sigSqr2
+  theta1Vect.c2[i] = theta1
+  theta2Vect.c2[i] = theta2
+  stats.c2[i, 1] = pi
+  stats.c2[i, 2] = theta1
+  stats.c2[i, 3] = theta2
+  stats.c2[i, 4] = sigSqr1
+  stats.c2[i, 5] = sigSqr2
+  
+}
+theta.min.c2 = pmin(stats.c2[,"theta1"], stats.c2[,"theta2"])
+theta.max.c2 = pmax(stats.c2[,"theta1"], stats.c2[,"theta2"])
+```
+
+## 4.1 Sample Splits
+We will example $\theta_{(1)}$, the mean of the normal blood glucose level group in mg/dL.
+The Sample Splits (seen in figure 2) between the chain indicate that the model is converging well.  The 1-5000 chain looks fairly different from the other 3 chains.  This is likely due to the way that $x$ was initialized.  Because $x$ was assigned to group 1 or 2 (low glucose group or high glucose group) with a 50-50 chance, the mean for the first few iterations would be much closer to the population mean.  The max value in the theta min for chain 1 is 111.6.  There are only 6 (out of 10,000) sampled means in the theta min group whose mean is higher than 112, and they are all the first 6 values from the Gibbs sampler.  So the model in chain 2 converging quite quickly, even though it is significantly different from the model with chain 1 for the first several iterations.  If a burn in was used, we expect that all of these splits would look the same.  We will test this claim later in the JAGS section by running JAGS on both chains with a burn in of 1000, and evaluate the distributions of the sample splits.
+
+### Figure 2:  Sample Splits for multiple chains for normal blood glucose level group
+```{r, echo=FALSE}
+par(mfrow = c(2,2))
+
+b = 12
+
+c1.5 = theta.min.c1[1:5000]
+hist(c1.5, prob=TRUE, main="Chain 1, Samples 1:5000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c1.5))
+
+c1.10 = theta.min.c1[5001:10000]
+hist(c1.10, prob=TRUE, main="Chain 1, Samples 5001:10000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c1.10))
+
+c2.5 = theta.min.c2[1:5000]
+hist(c2.5, prob=TRUE, main="Chain 2, Samples 1:5000", ylim=c(0,0.2), xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c2.5))
+
+c2.10 = theta.min.c2[5001:10000]
+hist(c2.10, prob=TRUE, main="Chain 2, Samples 5001:10000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c2.10))
+```
+
+## 4.3 Multiple Chains
+In this section we will examine $\theta_{(2)}$, the posterior mean of the high blood glucose group.  As both chains both quickly converge to the same posterior mean, we can be confident that the model is not too sensitive to initial conditions.  Again, the second chain is skewed (this time in the other direction) due to the initialization of $x$.  Due to this initialization, the first few means from both the normal and high blood glucose groups is very close to 120.  After only a few iterations, the sampler converges to the mean.
+
+## Figure 3:  Histrograms and Density for Multiple Chains for high blood glucose group
+```{r, echo=FALSE}
+par(mfrow = c(2,1))
+
+b = 12
+
+hist(theta.max.c1, prob=TRUE, main="Chain 1 Historam and Density", xlab = "blood glucose (mg/dL)", breaks=b, ylim=c(0, 0.1))
+lines(density(theta.max.c1))
+
+hist(theta.max.c2, prob=TRUE, main="Chain 2 Historam and Density", xlab = "blood glucose (mg/dL)", breaks=b, ylim=c(0, 0.1))
+lines(density(theta.max.c2))
+```
+
+
+## 4.4 Trace Plots
+The trace plots for both chains indicate reasonable performance for the model.  There do not appear to be multiple regions of stability.  As discussed in the last section, the second chain starts quite a bit higher than the expected mean for the low blood glucose group due to random initialization, but converges very quickly.
+
+### Figure 4:  Trace plots for multiple chains
+Figure 4 shows the trace plots $\theta_{(1)}$, the posterior mean of the low blood glucose group, for chain 1 and chain 2.
+```{r, echo=FALSE}
+par(mfrow = c(2,1))
+plot(theta.min.c1, type='l', main='Chain 1 Trace plot', ylab=expression(paste(theta)^{(1)}))
+plot(theta.min.c2, type='l', main='Chain 2 Trace plot', ylab=expression(paste(theta)^{(1)}))
+```
+
+## 4.5 ACF and Effective Size
+### Figure 5:  ACF Plots for Multiple Chains
+Figure 5 shows the ACF plots for chain 1 and chain 2 for $\theta_{(1)}$, the posterior mean of the low blood glucose group.  For chain 1, the samples are correlated up until about a lag of 70.  That is, for about every 70 Gibbs samples, there is only about 1 independent sample.  This will result in a small sample size.  For chain 2 the samples are correlated for a lag of up to about 80.  
+
+```{r, echo=FALSE}
+par(mfrow = c(1,2))
+acf(theta.min.c1, lag.max = 100, main="ACF Plot for Chain 1")
+acf(theta.min.c2, lag.max = 100, main="ACF Plot for Chain 2")
+```
+
+### Table 1:  Effective Sizes for Multiple Chains
+Table 1 shows the effective size for the parameters $\theta_{(1)}, \theta_{(2)}$ (mean blood glucose for normal and high glucose groups), and $\pi$ (proportion of participants in each group).  Although the effective sizes are pretty small, analysis on larger sample sizes leads to similar results in terms of posterior statistics.
+```{r, echo=FALSE, render=lemon_print}
+rows = c("theta1 (normal blood glucose)", "theta2 (high blood glucose)", "pi")
+effC1 = c(round(effectiveSize(theta.min.c1), 0), round(effectiveSize(theta.max.c1),0), round(effectiveSize(stats.c1[,"pi"]),0))
+effC2 = c(round(effectiveSize(theta.min.c2),0), round(effectiveSize(theta.max.c2),0), round(effectiveSize(stats.c2[,"pi"]),0))
+res = data.frame(rows, effC1, effC2)
+colnames(res) <- c("parameter", "chain1 effective size", "chain 2 effective size")
+res
+```
+
+Bases on the results results, we believe that $S=5000$ samples is enough for this analysis.  Although the sample size is relatively small, we also tried larger sample sizes (up to 100,000) and found very similar results for posterior means and confidence intervals.
+
+## Summary statistics
+### Table 2:  Summary Statistics for Gibbs Sampler
+Table 2a and 2b show the summary statistics for the models.  Interestingly, what each parameter in the model represents changes between the chains, and we reflect this by showing the proportion that the model itself captures (in chain 1, $\pi$ captures the normal blood glucose group proportion, and in chain 2, $\pi$ captures the high blood glucose group proportion).  Chain 1 and 2 match closely, and the mean proportions between the chains sum to 1.
+#### Table 2a:  Summary Statistics for Chain 1
+```{r, echo=FALSE, render=lemon_print}
+library(dplyr)
+rownames = c("normal blood glucose post. mean (mg/dL)", "high blood glucose post. mean (mg/dL)", "proportion in normal group", "min of groups")
+theta1 = stats.c1[,"theta1"]
+theta2 = stats.c1[,"theta2"]
+pi = stats.c1[,"pi"]
+means = c(mean(theta1), mean(theta2), mean(pi), mean(theta.min.c1))
+qt1 = quantile(theta1, c(0.025, 0.975))
+qt2 = quantile(theta2, c(0.025, 0.975))
+qpi = quantile(pi, c(0.025, 0.975))
+qtMin = quantile(theta.min.c1, c(0.025, 0.975))
+q2.5 = c(qt1[1], qt2[1], qpi[1], qtMin[1])
+q97.5 = c(qt1[2], qt2[2], qpi[2], qtMin[2])
+res = data.frame(rownames, means, q2.5, q97.5)
+colnames(res) = c("variable", "mean", "2.5% quantile", "97.5% quantile")
+res[,-1] = round(res[,-1],2)
+res
+```
+
+Summary stats for chain 2.
+#### Table 2b:  Summary Statistics for Chain 2
+```{r, echo=FALSE, render=lemon_print}
+rownames = c("high blood glucose post. mean (mg/dL)", "normal blood glucose (mg/dL) post. mean", "proportion in high group", "min of groups")
+theta1 = stats.c2[,"theta1"]
+theta2 = stats.c2[,"theta2"]
+pi = stats.c2[,"pi"]
+means = c(mean(theta1), mean(theta2), mean(pi), mean(theta.min.c2))
+qt1 = quantile(theta1, c(0.025, 0.975))
+qt2 = quantile(theta2, c(0.025, 0.975))
+qpi = quantile(pi, c(0.025, 0.975))
+qtMin = quantile(theta.min.c2, c(0.025, 0.975))
+q2.5 = c(qt1[1], qt2[1], qpi[1], qtMin[1])
+q97.5 = c(qt1[2], qt2[2], qpi[2], qtMin[2])
+res = data.frame(rownames, means, q2.5, q97.5)
+colnames(res) = c("variable", "mean", "2.5% quantile", "97.5% quantile")
+res[,-1] = round(res[,-1],2)
+res
+```
+
+# Section 5: MCMC Diagnostics
+```{r, echo=FALSE, include=FALSE}
+data = scan("glucose.dat")
+y = data
+x = as.integer(y >= median(y)) + 1
+alpha = 1
+beta = 1
+sigSqr0=1000
+n = length(y)
+line.data <- list("y" = y, "n" = n, "mu0" = 120, nu0=10, "tau0" = 1/200, "sig20" = 1000, "alpha"=alpha, "beta"=beta)
+
+line.init <- list(list("x"=x), list("x"=rbinom(n, 1, 0.5) + 1))
+
+model <- jags.model("Week12JAGS.R", 
+   data = line.data, init=line.init, n.chains = 2)
+
+update(model, n.iter = 1000) # with 1000 burn-in
+
+samples <- coda.samples(model, 
+	variable.names = c("theta", "tau", "pi", "ypred", "thetaMin", "thetaMax"), 
+	thin = 1, n.iter = 10000)
+
+summary(samples)
+```
+
+
+## Sample Splits for JAGS
+### Figure 6:  Sample Splits for JAGS normal blood glucose group
+Figure 6 shows the sample splits for both JAGS chains for the normal blood glucose group.  The main difference between these and the results in Figure 2 is Chain 2, Samples 1:5000.  Earlier we saw that it took about 6 iterations for the chain 2 Gibbs sampler to reach a reasonable mean.  Because a burn-in of 1000 is used for JAGS, the model had already converged.  All 4 histograms and density plots here look very similar, indicating that the model is converging well.
+```{r, echo=FALSE}
+par(mfrow = c(2,2))
+
+res1 = samples[[1]]
+res2 = samples[[2]]
+
+theta.min.c1 = res1[, "thetaMin"]
+theta.min.c2 = res1[, "thetaMin"]
+
+b = 12
+
+c1.5 = theta.min.c1[1:5000]
+hist(c1.5, prob=TRUE, main="Chain 1, Samples 1:5000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c1.5))
+
+c1.10 = theta.min.c1[5001:10000]
+hist(c1.10, prob=TRUE, main="Chain 1, Samples 5001:10000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c1.10))
+
+c2.5 = theta.min.c2[1:5000]
+hist(c2.5, prob=TRUE, main="Chain 2, Samples 1:5000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c2.5))
+
+c2.10 = theta.min.c2[5001:10000]
+hist(c2.10, prob=TRUE, main="Chain 2, Samples 5001:10000", xlab = "blood glucose (mg/dL)", breaks=b)
+lines(density(c2.10))
+```
+
+
+# Section 6: Model Checking and Summary Statistics
+As the effective sample sizes from the previous section were small, we rerun the the model with 50,000 iterations.  We will only focus on results from chain 1.
+```{r, echo=FALSE, include=FALSE}
+# Model Conditions
+data = scan("glucose.dat")
+y = data
+n = length(data)
+alpha=1
+beta=1
+mu0=120
+tau0 = 200
+sigSqr0=1000
+nu0=10
+S=50000
+pi = 0.5
+# if y >= median, then x=2.  Thus x=1 when y<median.
+
+##################################################  CHAIN 1   ##################################################
+# Initial Conditions
+x = as.integer(y >= median(y)) + 1
+sigSqr1 = var(y[x==1])
+sigSqr2 = var(y[x==2])
+
+# stats we're recording
+theta1Vect.c1 = rep(NA, S)
+theta2Vect.c1 = rep(NA, S)
+sigSqr1Vect.c1 = rep(NA, S)
+sigSqr2Vect.c1 = rep(NA, S)
+X.c1 = matrix(nrow=S, ncol=n)
+Ytidle.c1 = matrix(nrow=S, ncol=n)
+ytidle.c1 = rep(NA, n)
+#stat_names = c("pi", "theta1", "theta2", "sigSqr2")
+stats.c1 = matrix(nrow=S, ncol=5)
+colnames(stats.c1) = c("pi", "theta1", "theta2", "sigSqr1", "sigSqr2")
+
+set.seed(73)
+for (i in 1:S) {
+  n1 = sum(x==1)
+  n2 = sum(x==2)
+  y1 = y[x==1]
+  y2 = y[x==2]
+  
+  pi = rbeta(1, alpha+n1, beta+(n-n1))
+  
+  # theta 1
+  s2n1 = 1/(1/tau0 + n1/sigSqr1)
+  mun1 = (1/tau0*mu0 + n1/sigSqr1*mean(y1))/(1/tau0 + n1/sigSqr1)
+  theta1 = rnorm(1, mun1, sqrt(s2n1))
+  
+  # siq sqr 1
+  nun1 = nu0+n1
+  s2n1 = ( nu0*sigSqr0 + sum((y1-theta1)^2) ) / nun1
+  sigSqr1 = 1/rgamma(1, nun1/2, s2n1*nun1/2)
+  
+  # theta 2
+  s2n2 = 1/(1/tau0 + n2/sigSqr2)
+  mun2 = (1/tau0*mu0 + n2/sigSqr2*mean(y2))/(1/tau0 + n2/sigSqr2)
+  theta2 = rnorm(1, mun2, sqrt(s2n2))
+  
+  # sig sqr 2
+  nun2 = nu0+n2
+  s2n2 = (nu0*sigSqr0 + sum((y2-theta2)^2) ) / nun2
+  sigSqr2 = 1/rgamma(1, nun2/2, s2n2*nun2/2)
+  
+  x1 = pi * dnorm(y, theta1, sqrt(sigSqr1))
+  x2 = (1-pi) * dnorm(y, theta2, sqrt(sigSqr2))
+  
+  prob = x2/(x1+x2)
+  x <- rbinom(n, 1, prob) + 1
+  xPI = rbinom(n, 1, 1-pi) + 1
+  X.c1[i,] = x
+  ytidle.c1[which(xPI==1)] = rnorm(length(which(xPI==1)), theta1, sqrt(sigSqr1))
+  ytidle.c1[which(xPI==2)] = rnorm(length(which(xPI==2)), theta2, sqrt(sigSqr2))
+  Ytidle.c1[i,] = ytidle.c1
+  
+  sigSqr1Vect.c1[i] = sigSqr1
+  sigSqr2Vect.c1[i] = sigSqr2
+  theta1Vect.c1[i] = theta1
+  theta2Vect.c1[i] = theta2
+  stats.c1[i, 1] = pi
+  stats.c1[i, 2] = theta1
+  stats.c1[i, 3] = theta2
+  stats.c1[i, 4] = sigSqr1
+  stats.c1[i, 5] = sigSqr2
+  
+}
+theta.min.c1 = pmin(stats.c1[,"theta1"], stats.c1[,"theta2"])
+theta.max.c1 = pmax(stats.c1[,"theta1"], stats.c1[,"theta2"])
+
+##################################################  CHAIN 2   ##################################################
+# Initial Conditions
+x = rbinom(n, 1, 0.5) + 1
+sigSqr1 = var(y[x==1])
+sigSqr2 = var(y[x==2])
+
+# stats we're recording
+theta1Vect.c2 = rep(NA, S)
+theta2Vect.c2 = rep(NA, S)
+sigSqr1Vect.c2 = rep(NA, S)
+sigSqr2Vect.c2 = rep(NA, S)
+X.c2 = matrix(nrow=S, ncol=n)
+Ytidle.c2 = matrix(nrow=S, ncol=n)
+ytidle.c2 = rep(NA, n)
+#stat_names = c("pi", "theta1", "theta2", "sigSqr2")
+stats.c2 = matrix(nrow=S, ncol=5)
+colnames(stats.c2) = c("pi", "theta1", "theta2", "sigSqr1", "sigSqr2")
+
+set.seed(73)
+for (i in 1:S) {
+  n1 = sum(x==1)
+  n2 = sum(x==2)
+  y1 = y[x==1]
+  y2 = y[x==2]
+  
+  pi = rbeta(1, alpha+n1, beta+(n-n1))
+  
+  # theta 1
+  s2n1 = 1/(1/tau0 + n1/sigSqr1)
+  mun1 = (1/tau0*mu0 + n1/sigSqr1*mean(y1))/(1/tau0 + n1/sigSqr1)
+  theta1 = rnorm(1, mun1, sqrt(s2n1))
+  
+  # siq sqr 1
+  nun1 = nu0+n1
+  s2n1 = ( nu0*sigSqr0 + sum((y1-theta1)^2) ) / nun1
+  sigSqr1 = 1/rgamma(1, nun1/2, s2n1*nun1/2)
+  
+  # theta 2
+  s2n2 = 1/(1/tau0 + n2/sigSqr2)
+  mun2 = (1/tau0*mu0 + n2/sigSqr2*mean(y2))/(1/tau0 + n2/sigSqr2)
+  theta2 = rnorm(1, mun2, sqrt(s2n2))
+  
+  # sig sqr 2
+  nun2 = nu0+n2
+  s2n2 = (nu0*sigSqr0 + sum((y2-theta2)^2) ) / nun2
+  sigSqr2 = 1/rgamma(1, nun2/2, s2n2*nun2/2)
+  
+  x1 = pi * dnorm(y, theta1, sqrt(sigSqr1))
+  x2 = (1-pi) * dnorm(y, theta2, sqrt(sigSqr2))
+  
+  prob = x2/(x1+x2)
+  x <- rbinom(n, 1, prob) + 1
+  xPI = rbinom(n, 1, 1-pi) + 1
+  X.c2[i,] = x
+  ytidle.c2[which(xPI==1)] = rnorm(length(which(xPI==1)), theta1, sqrt(sigSqr1))
+  ytidle.c2[which(xPI==2)] = rnorm(length(which(xPI==2)), theta2, sqrt(sigSqr2))
+  Ytidle.c2[i,] = ytidle.c2
+  
+  sigSqr1Vect.c2[i] = sigSqr1
+  sigSqr2Vect.c2[i] = sigSqr2
+  theta1Vect.c2[i] = theta1
+  theta2Vect.c2[i] = theta2
+  stats.c2[i, 1] = pi
+  stats.c2[i, 2] = theta1
+  stats.c2[i, 3] = theta2
+  stats.c2[i, 4] = sigSqr1
+  stats.c2[i, 5] = sigSqr2
+  
+}
+theta.min.c2 = pmin(stats.c2[,"theta1"], stats.c2[,"theta2"])
+theta.max.c2 = pmax(stats.c2[,"theta1"], stats.c2[,"theta2"])
+```
+
+```{r, echo=FALSE, include=FALSE}
+data = scan("glucose.dat")
+y = data
+x = as.integer(y >= median(y)) + 1
+alpha = 1
+beta = 1
+sigSqr0=1000
+n = length(y)
+line.data <- list("y" = y, "n" = n, "mu0" = 120, nu0=10, "tau0" = 1/200, "sig20" = 1000, "alpha"=alpha, "beta"=beta)
+
+line.init <- list("x"=x)
+
+model <- jags.model("Week12JAGS.R", 
+   data = line.data, init=line.init, n.chains = 1)
+
+update(model, n.iter = 1000) # with 1000 burn-in
+
+samples <- coda.samples(model, 
+	variable.names = c("theta", "tau", "pi", "ypred", "thetaMin", "thetaMax"), 
+	thin = 1, n.iter = 50000)
+
+summary(samples)
+```
+
+### Table 3:  Posterior Summary statistics
+Table 3a and 3b show posterior summary statistics for both the Gibbs Sampler and JAGS.  The Gibbs Sampler and JAGS models match very closely for means and confidence intervals.
+#### Table 3a:  Summary stats for Gibbs Sampler.
+Table 3a shows the posterior mean for the Gibbs Sampler.  The mean for the normal blood glucose group is about 104 mg/dL, which is roughly what would be expected from a fasted person without diabetes.  The high glucose group has a mean of about 149.  If a fasted person tested 126 mg/dL on two occasions, they would be diagnosed with diabetes.  Thus, the two groups may represent no diabetes and diabetes.
+```{r, echo=FALSE, render=lemon_print}
+rownames = c("normal blood glucose post. mean (mg/dL)", "high blood glucose post. mean (mg/dL)", "proportion in normal blood glucose group")
+theta1 = stats.c1[,"theta1"]
+theta2 = stats.c1[,"theta2"]
+pi = stats.c1[,"pi"]
+means = c(mean(theta1), mean(theta2), mean(pi))
+qt1 = quantile(theta1, c(0.025, 0.975))
+qt2 = quantile(theta2, c(0.025, 0.975))
+qpi = quantile(pi, c(0.025, 0.975))
+q2.5 = c(qt1[1], qt2[1], qpi[1])
+q97.5 = c(qt1[2], qt2[2], qpi[2])
+res = data.frame(rownames, means, q2.5, q97.5)
+colnames(res) = c("variable", "mean", "2.5% quantile", "97.5% quantile")
+res[,-1] = round(res[,-1],2)
+res
+```
+
+### Table 3b:  Summary stats for JAGS.
+```{r, echo=FALSE, render=lemon_print}
+res1 = samples[[1]]
+rownames = c("normal blood glucose post. mean (mg/dL)", "high blood glucose post. mean (mg/dL)", "proportion in normal blood glucose group")
+theta1 = res1[, "thetaMin"]
+theta2 = res1[, "thetaMax"]
+pi = res1[,"pi"]
+means = c(mean(theta1), mean(theta2), mean(pi))
+qt1 = quantile(theta1, c(0.025, 0.975))
+qt2 = quantile(theta2, c(0.025, 0.975))
+qpi = quantile(pi, c(0.025, 0.975))
+q2.5 = c(qt1[1], qt2[1], qpi[1])
+q97.5 = c(qt1[2], qt2[2], qpi[2])
+res = data.frame(rownames, means, q2.5, q97.5)
+colnames(res) = c("variable", "mean", "2.5% quantile", "97.5% quantile")
+res[,-1] = round(res[,-1],2)
+res
+```
+
+### Figure 7
+Figure 7 shows the predictive posterior distribution histogram and density plot next to the histogram and density plot of the data.  The overall shape largely matches.  However, the data almost cuts off above about 200 mg/dL while the predictive distribution looks smooth at both ends.  Also, the data is multi-modal with at least 3 peaks, while the predictive distribution appears unimodal.
+
+```{r, echo=FALSE}
+par(mfrow = c(1,2))
+ypred = res1[, c("ypred[1]", "ypred[2]")]
+ypred = c(ypred[,1], ypred[,2])
+hist(ypred, probability = TRUE, breaks=20, 
+     xlab = "Blood Glucose Level (mg/dL)",
+     xlim = c(0, 250),
+     ylim = c(0, 0.015),
+     main="JAGS Posterior Predictive Dist.")
+lines(density(ypred))
+
+hist(data, prob=TRUE, breaks=20,
+     xlab = "Blood Glucose Level (mg/dL)",
+     xlim = c(0, 250),
+     ylim = c(0, 0.015),
+     main = "Data")
+lines(density(data))
+```
+
+
+### Figure 8:  Density of data vs predicted distribution
+Figure 8 shows the density plots of the Data (black) and the JAGS Posterior Predictive Distribution (Red).  Again, the model matches the data pretty well.
+
+```{r, echo=FALSE}
+plot(density(data),
+     xlim = c(0, 250),
+     xlab = "Blood Glucose Level (mg/dL)",
+     main = "Data vs Predicted Distribution Density")
+lines(density(ypred), col=2)
+legend(x = 135, y = 0.014, 
+   legend = c("Data", "JAGS Predictive Distribution"),
+   col = c(1, 2), lwd = 1)
+```
+
+# Section 7: Conclusion and Discussion
+Our statistical model was able to match the data fairly well.  Multiple chains indicate that the model is not too sensitive to initial conditions, except in what each parameter in the model represents.  Trace plots and sample splits indicate that the model converges fairly quickly.  Trace plots also indicate that the model does not get stuck in any particular area.  The samples are highly correlated, and every 70 or so samples only gives one independent sample. We were able to compensate for this by increasing the sample size.  Sample sizes of $S=10,000$ and $S = 50,000$ give similar results for posterior means.  Also, the JAGS model and Gibbs sampler perform very similarly.
+
+The model was able to capture different groups of participants, one group with a normal blood glucose of about 104 mg/dL, and the other group with a high blood glucose of about 149 mg/dL.  Further, about 62% of participants were in the normal blood glucose group and the other 38% were in the high blood glucose group.  We can say with near certainty that the participants in the first group do not have diabetes, as a fasted individual with diabetes will usually have a blood glucose level of at least 126 mg/dL (CDC).  We cannot say very much about the second group.  If we knew everyone who took the test was fasted, we could conclude the second group likely has diabetes.  However, as we don't have this information it's possible that many of those participants simply had a snack before taking the blood test.  'The high glucose group included 38% about of the participants, which is much higher than the proportion of the US population (12%).  However, the individuals who were tested came from the Pima Indians.  The Pima Indians have a high rate of diabetes compared to the rest of the United States (NIH).
+
+
+# References:
+CDC:  https://www.cdc.gov/diabetes/basics/ .
+NIH:  https://pubmed.ncbi.nlm.nih.gov/7468572/ .
+
+
+
